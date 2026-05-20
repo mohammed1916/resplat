@@ -166,6 +166,36 @@ Quick check after install:
 python -c "import pointops; print('pointops OK')"
 ```
 
+#### Commands Used In This Workspace
+
+These are the exact commands used here to reproduce and validate the demo run:
+
+```powershell
+# Confirm the Python environment used for the run
+C:\Users\BBBS-AI-01\AppData\Local\Programs\Python\Python310\python.exe --version
+C:\Users\BBBS-AI-01\AppData\Local\Programs\Python\Python310\python.exe -m pip --version
+
+# Confirm pointops import status
+C:\Users\BBBS-AI-01\AppData\Local\Programs\Python\Python310\python.exe -c "import pointops; print('pointops import ok')"
+
+# Run the COLMAP demo scene
+C:\Users\BBBS-AI-01\AppData\Local\Programs\Python\Python310\python.exe scripts/infer_colmap.py `
+  --model_preset dl3dv_8v_256x448 `
+  --scene_path data/dl3dv-colmap-demo/dl3dv-colmap-demo/02267acf6fb98de36173bf4e7db9734c8c421dcb00267e42964dc15134cbb1be `
+  --output_dir results/colmap-dl3dv-demo/dl3dv_8v_256x448 `
+  --save_images `
+  --save_video `
+  --save_ply
+
+# Inspect generated outputs
+Set-Location 'C:\Users\BBBS-AI-01\d\resplat'
+$root = 'results\colmap-dl3dv-demo\dl3dv_8v_256x448'
+if (Test-Path $root) {
+  Get-ChildItem -Path $root -File -Recurse | ForEach-Object { $_.FullName.Substring((Get-Location).Path.Length + 1) }
+  Write-Output ('metrics.json exists: ' + (Test-Path (Join-Path $root 'metrics.json')))
+}
+```
+
 
 ## Evaluation
 
