@@ -83,6 +83,89 @@ Check [scripts/infer_colmap.sh](scripts/infer_colmap.sh) for running our pre-tra
 
 A demo scene can be downloaded [here](https://huggingface.co/datasets/haofeixu/depthsplat/resolve/main/dl3dv-colmap-demo.zip) to quickly try our method.
 
+### Run COLMAP Demo (Single Scene)
+
+The script [scripts/infer_colmap.py](scripts/infer_colmap.py) expects:
+
+- `--data_dir` containing scene subfolders
+- each scene folder containing `images_4/` (or custom `--images_dir`) and `sparse/0/`
+
+For the released DL3DV demo zip, the path layout is:
+
+`data/dl3dv-colmap-demo/dl3dv-colmap-demo/<SCENE_HASH>/...`
+
+#### 1) Download a checkpoint
+
+Example (8-view, 256x448):
+
+```bash
+mkdir -p pretrained
+wget -O pretrained/resplat-base-dl3dv-256x448-view8-1934a04c.pth \
+  https://huggingface.co/haofeixu/resplat/resolve/main/resplat-base-dl3dv-256x448-view8-1934a04c.pth
+```
+
+Windows PowerShell:
+
+```powershell
+New-Item -ItemType Directory -Force -Path pretrained | Out-Null
+Invoke-WebRequest `
+  -Uri "https://huggingface.co/haofeixu/resplat/resolve/main/resplat-base-dl3dv-256x448-view8-1934a04c.pth" `
+  -OutFile "pretrained/resplat-base-dl3dv-256x448-view8-1934a04c.pth"
+```
+
+#### 2) Run inference
+
+```bash
+python scripts/infer_colmap.py \
+  --model_preset dl3dv_8v_256x448 \
+  --data_dir data/dl3dv-colmap-demo/dl3dv-colmap-demo \
+  --scene_name 02267acf6fb98de36173bf4e7db9734c8c421dcb00267e42964dc15134cbb1be \
+  --output_dir results/colmap-dl3dv-demo/dl3dv_8v_256x448 \
+  --save_images \
+  --save_video \
+  --save_ply
+```
+
+Windows PowerShell:
+
+```powershell
+python scripts/infer_colmap.py `
+  --model_preset dl3dv_8v_256x448 `
+  --data_dir data/dl3dv-colmap-demo/dl3dv-colmap-demo `
+  --scene_name 02267acf6fb98de36173bf4e7db9734c8c421dcb00267e42964dc15134cbb1be `
+  --output_dir results/colmap-dl3dv-demo/dl3dv_8v_256x448 `
+  --save_images `
+  --save_video `
+  --save_ply
+```
+
+Outputs are saved under the output directory, including rendered images, `video.mp4`, `gaussians.ply`, and `metrics.json`.
+
+#### Troubleshooting
+
+If inference stops at model build with:
+
+`No module named 'pointops'`
+
+install pointops from its own directory:
+
+```bash
+cd src/model/encoder/pointops
+python setup.py install
+cd ../../../..
+```
+
+On Windows, pointops compilation may fail with MSVC/CUDA toolchain mismatch (for example `fatal error C1189: -- unsupported Microsoft Visual Studio version`). In that case, use one of these options:
+
+- build in a Linux/WSL environment with compatible CUDA + compiler toolchain
+- align local CUDA, MSVC Build Tools, and PyTorch versions to a supported combination
+
+Quick check after install:
+
+```bash
+python -c "import pointops; print('pointops OK')"
+```
+
 
 ## Evaluation
 
