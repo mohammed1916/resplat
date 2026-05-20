@@ -58,36 +58,54 @@ class GSplatDecoderSplattingCUDA(Decoder[GSplatDecoderSplattingCUDACfg]):
             covars = None
         opacities = gaussians.opacities  # [B, G]
         colors = gaussians.harmonics.permute(0, 1, 3, 2)  # [B, G, d_sh, 3]
-        sh_degree = int(math.sqrt(colors.shape[-2])) - 1  # d_sh = (degree + 1) ** 2
+        # d_sh = (degree + 1) ** 2
+        sh_degree = int(math.sqrt(colors.shape[-2])) - 1
         viewmats = extrinsics.inverse()  # [B, V, 4, 4]
         intrinsics = intrinsics.clone()  # [B, V, 3, 3]
         # scale to the image shape
         intrinsics[:, :, 0] *= width
         intrinsics[:, :, 1] *= height
 
-        render_colors, render_alphas, meta = rasterization(
-            means=means,
-            quats=quats,
-            scales=scales,
-            opacities=opacities,
-            colors=colors,
-            sh_degree=sh_degree,
-            viewmats=viewmats,
-            Ks=intrinsics,
-            width=width,
-            height=height,
-            near_plane=near[0, 0].item(),  # expect float
-            far_plane=far[0, 0].item(),
-            eps2d=0.1,
-            rasterize_mode="antialiased",
-            packed=True,
-            absgrad=False,
-            sparse_grad=False,
-            render_mode="RGB+ED",
-            covars=covars,
-        )
+        render_colors_list = []
+        render_alphas_list = []
 
-        color = render_colors[..., :3].permute(0, 1, 4, 2, 3)  # [B, V, 3, H, W]
+        for bidx in range(means.shape[0]):
+            # Some gsplat versions only accept per-batch inputs (no leading batch dim).
+            render_colors_b, render_alphas_b, _ = rasterization(
+                means=means[bidx],
+                quats=quats[bidx],
+                scales=scales[bidx],
+                opacities=opacities[bidx],
+                colors=colors[bidx],
+                sh_degree=sh_degree,
+                viewmats=viewmats[bidx],
+                Ks=intrinsics[bidx],
+                width=width,
+                height=height,
+                near_plane=near[bidx, 0].item(),
+                far_plane=far[bidx, 0].item(),
+                eps2d=0.1,
+                rasterize_mode="antialiased",
+                packed=True,
+                absgrad=False,
+                sparse_grad=False,
+                render_mode="RGB+ED",
+                covars=(covars[bidx] if covars is not None else None),
+            )
+
+            if render_colors_b.ndim == 5:
+                render_colors_b = render_colors_b.squeeze(0)
+            if render_alphas_b.ndim == 5:
+                render_alphas_b = render_alphas_b.squeeze(0)
+
+            render_colors_list.append(render_colors_b)
+            render_alphas_list.append(render_alphas_b)
+
+        render_colors = torch.stack(render_colors_list, dim=0)
+        render_alphas = torch.stack(render_alphas_list, dim=0)
+
+        color = render_colors[..., :3].permute(
+            0, 1, 4, 2, 3)  # [B, V, 3, H, W]
         depth = render_colors[..., -1]  # [B, V, H, W]
 
         return DecoderOutput(

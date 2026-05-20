@@ -4,18 +4,40 @@ import torch.nn.functional as F
 
 import torch.utils.checkpoint
 
-import pointops
+try:
+    import pointops
+    POINTOPS_AVAILABLE = True
+except ModuleNotFoundError:
+    pointops = None
+    POINTOPS_AVAILABLE = False
 from einops import rearrange
 
 from ..unimatch.dinov2.layers.block import Block as MultiViewBlock
 from .local_knn import local_knn_query
 
 
+def group_by_index(x, idx):
+    """Gather features by KNN index.
+
+    Args:
+        x: [N, C]
+        idx: [N, K]
+
+    Returns:
+        gathered: [N, K, C]
+    """
+    n, c = x.shape
+    idx = idx.long().clamp(0, n - 1)
+    gathered = x.index_select(
+        0, idx.reshape(-1)).reshape(idx.shape[0], idx.shape[1], c)
+    return gathered
+
+
 class KNNAttention(nn.Module):
     def __init__(self, channels, knn_samples=16,
-        num_heads=1,
-        proj_channels=None,
-        ):
+                 num_heads=1,
+                 proj_channels=None,
+                 ):
         super().__init__()
         self.proj_channels = proj_channels
 
@@ -46,29 +68,40 @@ class KNNAttention(nn.Module):
         # [N, C]
         x_q, x_k, x_v = torch.chunk(qkv, chunks=3, dim=-1)
 
-        # [N, K, C+3], [N, K]
-        x_k, idx = pointops.knn_query_and_group(
-            x_k.contiguous(), p, o, new_xyz=p, new_offset=o,
-            idx=knn_idx,
-            nsample=self.knn_samples, with_xyz=False
-        )
+        if POINTOPS_AVAILABLE:
+            # [N, K, C+3], [N, K]
+            x_k, idx = pointops.knn_query_and_group(
+                x_k.contiguous(), p, o, new_xyz=p, new_offset=o,
+                idx=knn_idx,
+                nsample=self.knn_samples, with_xyz=False
+            )
 
-        # [N, K, C]
-        x_v, _ = pointops.knn_query_and_group(
-            x_v.contiguous(),
-            p,
-            o,
-            new_xyz=p,
-            new_offset=o,
-            idx=idx,
-            nsample=self.knn_samples,
-            with_xyz=False,
-        )
+            # [N, K, C]
+            x_v, _ = pointops.knn_query_and_group(
+                x_v.contiguous(),
+                p,
+                o,
+                new_xyz=p,
+                new_offset=o,
+                idx=idx,
+                nsample=self.knn_samples,
+                with_xyz=False,
+            )
+        else:
+            if knn_idx is None:
+                raise RuntimeError(
+                    "pointops is unavailable and knn_idx was not provided. "
+                    "Enable local KNN or provide precomputed indices."
+                )
+            idx = knn_idx
+            x_k = group_by_index(x_k.contiguous(), idx)
+            x_v = group_by_index(x_v.contiguous(), idx)
 
         n, k, c = x_k.shape
 
         # [N, 1, K]
-        scores = torch.matmul(x_q.unsqueeze(1), x_k.permute(0, 2, 1)) * scale_factor
+        scores = torch.matmul(x_q.unsqueeze(
+            1), x_k.permute(0, 2, 1)) * scale_factor
         # [N, C]
         out = torch.matmul(torch.softmax(scores, dim=2), x_v).squeeze(1)
 
@@ -99,16 +132,16 @@ class MLP(nn.Module):
 
 class TransformerBlock(nn.Module):
     def __init__(self, channels, knn_samples=16,
-        num_heads=1,
-        attn_proj_channels=None,
-        ):
+                 num_heads=1,
+                 attn_proj_channels=None,
+                 ):
         super().__init__()
 
         self.norm1 = nn.LayerNorm(channels)
         self.attn = KNNAttention(channels, knn_samples=knn_samples,
-            num_heads=num_heads,
-            proj_channels=attn_proj_channels,
-        )
+                                 num_heads=num_heads,
+                                 proj_channels=attn_proj_channels,
+                                 )
         self.norm2 = nn.LayerNorm(channels)
         self.mlp = MLP(channels)
 
@@ -123,19 +156,19 @@ class TransformerBlock(nn.Module):
 
 class PlainPointTransformer(nn.Module):
     def __init__(self, channels, knn_samples=16, num_blocks=4,
-        num_heads=1,
-        attn_proj_channels=None,
-        cache_knn_idx=True,
-        with_mv_attn=False,
-        with_mv_attn_lowres=False,
-        use_checkpointing=False,
-        init_use_checkpointing=False,
-        mvattn_down_factor=4,
-        use_local_knn=False,
-        local_knn_spatial_radius=3,
-        local_knn_num_neighbor_views=4,
-        local_knn_cross_view_radius=3,
-        ):
+                 num_heads=1,
+                 attn_proj_channels=None,
+                 cache_knn_idx=True,
+                 with_mv_attn=False,
+                 with_mv_attn_lowres=False,
+                 use_checkpointing=False,
+                 init_use_checkpointing=False,
+                 mvattn_down_factor=4,
+                 use_local_knn=False,
+                 local_knn_spatial_radius=3,
+                 local_knn_num_neighbor_views=4,
+                 local_knn_cross_view_radius=3,
+                 ):
         super().__init__()
 
         self.cache_knn_idx = cache_knn_idx
@@ -154,9 +187,9 @@ class PlainPointTransformer(nn.Module):
         self.blocks = nn.ModuleList()
         for _ in range(num_blocks):
             self.blocks.append(TransformerBlock(channels, knn_samples=knn_samples,
-                num_heads=num_heads,
-                attn_proj_channels=attn_proj_channels,
-                ))
+                                                num_heads=num_heads,
+                                                attn_proj_channels=attn_proj_channels,
+                                                ))
 
         # multi-view attention
         if self.with_mv_attn:
@@ -183,7 +216,7 @@ class PlainPointTransformer(nn.Module):
         Returns:
             knn_idx: [N, K] int tensor of KNN indices
         """
-        if self.use_local_knn:
+        if self.use_local_knn or not POINTOPS_AVAILABLE:
             assert b is not None and b == 1
             assert extrinsics is not None and intrinsics is not None
             knn_idx = local_knn_query(
@@ -209,7 +242,8 @@ class PlainPointTransformer(nn.Module):
                                        extrinsics=extrinsics,
                                        intrinsics=intrinsics)
 
-        num_blocks = len(self.mv_blocks) if self.with_mv_attn else len(self.blocks)
+        num_blocks = len(
+            self.mv_blocks) if self.with_mv_attn else len(self.blocks)
 
         if self.with_mv_attn:
             assert b is not None and v is not None and h is not None and w is not None
@@ -221,35 +255,41 @@ class PlainPointTransformer(nn.Module):
                     return blk_func(x, v=v, h=h, w=w)
 
                 for i in range(num_blocks):
-                    x = torch.utils.checkpoint.checkpoint(custom_forward_pt, self.blocks[i], p, x, o, knn_idx)
+                    x = torch.utils.checkpoint.checkpoint(
+                        custom_forward_pt, self.blocks[i], p, x, o, knn_idx)
                     # global multi-view attention
-                    x = rearrange(x, "(b v h w) c -> b (v h w) c", b=b, v=v, h=h, w=w)
+                    x = rearrange(x, "(b v h w) c -> b (v h w) c",
+                                  b=b, v=v, h=h, w=w)
                     if self.with_mv_attn_lowres:
-                        x = torch.utils.checkpoint.checkpoint(custom_forward_mv, self.mv_blocks[i], x, v, h, w)
+                        x = torch.utils.checkpoint.checkpoint(
+                            custom_forward_mv, self.mv_blocks[i], x, v, h, w)
                     else:
-                        x = torch.utils.checkpoint.checkpoint(self.mv_blocks[i], x)
+                        x = torch.utils.checkpoint.checkpoint(
+                            self.mv_blocks[i], x)
 
                     x = rearrange(x, "b (v h w) c -> (b v h w) c",
-                        b=b, v=v, h=h, w=w)
+                                  b=b, v=v, h=h, w=w)
 
             else:
                 for i in range(num_blocks):
                     x = self.blocks[i]([p, x, o], knn_idx=knn_idx)
                     # global multi-view attention
-                    x = rearrange(x, "(b v h w) c -> b (v h w) c", b=b, v=v, h=h, w=w)
+                    x = rearrange(x, "(b v h w) c -> b (v h w) c",
+                                  b=b, v=v, h=h, w=w)
                     if self.with_mv_attn_lowres:
                         x = self.mv_blocks[i](x, v=v, h=h, w=w)
                     else:
                         x = self.mv_blocks[i](x)
                     x = rearrange(x, "b (v h w) c -> (b v h w) c",
-                        b=b, v=v, h=h, w=w)
+                                  b=b, v=v, h=h, w=w)
         else:
             for i, blk in enumerate(self.blocks):
                 if self.use_checkpointing:
                     def custom_forward(p, x, o, idx):
                         return blk((p, x, o), knn_idx=idx)
 
-                    x = torch.utils.checkpoint.checkpoint(custom_forward, p, x, o, use_reentrant=not self.use_checkpointing)
+                    x = torch.utils.checkpoint.checkpoint(
+                        custom_forward, p, x, o, use_reentrant=not self.use_checkpointing)
                 else:
                     x = blk((p, x, o), knn_idx=knn_idx)
 
@@ -260,9 +300,9 @@ class PlainPointTransformer(nn.Module):
 
 class MultViewLowresAttn(nn.Module):
     def __init__(self, channels,
-        down_factor=4,
-        attn_proj_channels=None,
-        ):
+                 down_factor=4,
+                 attn_proj_channels=None,
+                 ):
         super().__init__()
 
         self.down_factor = down_factor
@@ -312,7 +352,8 @@ class MultViewLowresAttn(nn.Module):
         x = rearrange(x, "b (v h w) c -> (b v) c h w", v=v, h=h, w=w)
 
         if self.down_factor == 8:
-            x = F.interpolate(x, scale_factor=0.5, mode='bilinear', align_corners=True)
+            x = F.interpolate(x, scale_factor=0.5,
+                              mode='bilinear', align_corners=True)
             down_factor = 4
         else:
             down_factor = self.down_factor
@@ -328,11 +369,13 @@ class MultViewLowresAttn(nn.Module):
         x = self.proj2(x)
         x = self.norm2(x)
 
-        x = rearrange(x, "b (v h w) c -> (b v) c h w", v=v, h=h // self.down_factor, w=w // self.down_factor)
+        x = rearrange(x, "b (v h w) c -> (b v) c h w", v=v, h=h //
+                      self.down_factor, w=w // self.down_factor)
         x = F.pixel_shuffle(x, down_factor)
         x = self.conv(x)
         if self.down_factor == 8:
-            x = F.interpolate(x, scale_factor=2, mode='bilinear', align_corners=True)
+            x = F.interpolate(x, scale_factor=2,
+                              mode='bilinear', align_corners=True)
         x = rearrange(x, "(b v) c h w -> b (v h w) c", v=v)
         if self.attn_proj_channels:
             x = self.proj3(x)
@@ -346,14 +389,17 @@ class MultViewLowresAttn(nn.Module):
             x = self.proj0(x)
 
         assert y is not None
-        y = rearrange(y, "b (v h w) c -> (b v) c h w", h=h, w=w)  # different v with x
+        y = rearrange(y, "b (v h w) c -> (b v) c h w",
+                      h=h, w=w)  # different v with x
         num_cross_view = y.shape[0] // x.shape[0]
 
         x = rearrange(x, "b (v h w) c -> (b v) c h w", v=v, h=h, w=w)
 
         if self.down_factor == 8:
-            x = F.interpolate(x, scale_factor=0.5, mode='bilinear', align_corners=True)
-            y = F.interpolate(y, scale_factor=0.5, mode='bilinear', align_corners=True)
+            x = F.interpolate(x, scale_factor=0.5,
+                              mode='bilinear', align_corners=True)
+            y = F.interpolate(y, scale_factor=0.5,
+                              mode='bilinear', align_corners=True)
             down_factor = 4
         else:
             down_factor = self.down_factor
@@ -374,11 +420,13 @@ class MultViewLowresAttn(nn.Module):
         x = self.proj2(x)
         x = self.norm2(x)
 
-        x = rearrange(x, "b (v h w) c -> (b v) c h w", v=v, h=h // self.down_factor, w=w // self.down_factor)
+        x = rearrange(x, "b (v h w) c -> (b v) c h w", v=v, h=h //
+                      self.down_factor, w=w // self.down_factor)
         x = F.pixel_shuffle(x, down_factor)
         x = self.conv(x)
         if self.down_factor == 8:
-            x = F.interpolate(x, scale_factor=2, mode='bilinear', align_corners=True)
+            x = F.interpolate(x, scale_factor=2,
+                              mode='bilinear', align_corners=True)
         x = rearrange(x, "(b v) c h w -> b (v h w) c", v=v)
         if self.attn_proj_channels:
             x = self.proj3(x)
